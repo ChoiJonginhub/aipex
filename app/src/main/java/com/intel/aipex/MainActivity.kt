@@ -6,8 +6,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -19,19 +21,12 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavController
 import androidx.navigation.compose.*
 import com.google.android.gms.location.LocationServices
 import com.intel.aipex.ui.theme.AipexTheme
 import com.naver.maps.geometry.LatLng
-import com.naver.maps.map.CameraPosition
-import com.naver.maps.map.compose.ExperimentalNaverMapApi
-import com.naver.maps.map.compose.LocationTrackingMode
-import com.naver.maps.map.compose.MapProperties
-import com.naver.maps.map.compose.MapUiSettings
-import com.naver.maps.map.compose.NaverMap
-import com.naver.maps.map.compose.rememberCameraPositionState
-import com.naver.maps.map.compose.rememberFusedLocationSource
 import kotlinx.coroutines.delay
 
 class MainActivity : ComponentActivity() {
@@ -50,7 +45,6 @@ class MainActivity : ComponentActivity() {
 sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     object Home : Screen("home", "홈", Icons.Default.Home)
     object Search : Screen("search", "검색", Icons.Default.Search)
-    object Map : Screen("map", "지도", Icons.Default.LocationOn)
     object Settings : Screen("settings", "설정", Icons.Default.Settings)
 }
 
@@ -76,7 +70,6 @@ fun MainScreen() {
             }
             composable(Screen.Home.route) { HomeScreen() }
             composable(Screen.Search.route) { SearchScreen() }
-            composable(Screen.Map.route) { MapScreen() }
             composable(Screen.Settings.route) { SettingsScreen() }
         }
     }
@@ -112,14 +105,38 @@ fun HomeScreen() {
 }
 
 @Composable
-fun SearchScreen(onSearch: (String) -> Unit = {}) {
+fun SearchScreen(
+    searchModel: SearchViewModel = viewModel(),
+    directModel: DirectionViewModel = viewModel(),
+) {
+    val searchResults by searchModel.searchResults.collectAsState()
+    val routeResult by directModel.route.collectAsState()
     var query by remember { mutableStateOf("") }
+    val context = LocalContext.current
+    val fusedLocationClient = remember {
+        LocationServices.getFusedLocationProviderClient(context)
+    }
+    // 초기 위치: null 이면 카메라 이동하지 않음
+    var currentLocation by remember { mutableStateOf<LatLng?>(null) }
+    // 위치 가져오기 (권한이 이미 허용되어 있다고 가정)
+    var showDialog by remember { mutableStateOf(false) }
+    var selectedDestination by remember { mutableStateOf<GeocodeAddress?>(null) }
+    LaunchedEffect(Unit) {
+        try {
+            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+                location?.let {
+                    currentLocation = LatLng(it.latitude, it.longitude)
+                }
+            }
+        } catch (e: SecurityException) {
+            // 권한 없을 경우 처리
+        }
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-
         // 🔍 검색 입력창
         OutlinedTextField(
             value = query,
@@ -134,74 +151,52 @@ fun SearchScreen(onSearch: (String) -> Unit = {}) {
                 )
             }
         )
-
         Spacer(modifier = Modifier.height(12.dp))
-
         // 🔍 검색 버튼
         Button(
-            onClick = { onSearch(query) },
+            onClick = { searchModel.search(query) },
             modifier = Modifier.fillMaxWidth()
         ) {
             Text("검색")
         }
-        // 🔽 검색 결과 리스트 (UI 구조만)
-        Text("검색 결과", style = MaterialTheme.typography.titleMedium)
-
+        Spacer(modifier = Modifier.height(20.dp))
         LazyColumn(modifier = Modifier.fillMaxSize()) {
-            items(5) { index ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 6.dp)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text("결과 ${index + 1}", style = MaterialTheme.typography.bodyLarge)
-                        Text("여기에 장소 설명이 들어갑니다.", style = MaterialTheme.typography.bodyMedium)
-                    }
+            items(searchResults) { item ->
+                SearchResultCard(item = item) {
+                    selectedDestination = item
+                    showDialog = true
+                }
+            }
+            item {
+                routeResult?.let { result ->
+                    DirectionResultCard(item = result)
                 }
             }
         }
     }
-}
-
-@OptIn(ExperimentalNaverMapApi::class)
-@Composable
-fun MapScreen() {
-    val context = LocalContext.current
-    val fusedLocationClient = remember {
-        LocationServices.getFusedLocationProviderClient(context)
-    }
-    // 초기 위치: null 이면 카메라 이동하지 않음
-    var currentLocation by remember { mutableStateOf<LatLng?>(null) }
-    // 위치 가져오기 (권한이 이미 허용되어 있다고 가정)
-    LaunchedEffect(Unit) {
-        try {
-            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                location?.let {
-                    currentLocation = LatLng(it.latitude, it.longitude)
+    // 다이얼로그 UI
+    if (showDialog && selectedDestination != null) {
+        val dest = selectedDestination!!
+        AlertDialog(
+            onDismissRequest = { showDialog = false },
+            title = { Text("길찾기") },
+            text = { Text("이 주소로 길찾기를 실행할까요?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showDialog = false
+                    directModel.requestRoute(
+                        startLat = currentLocation?.latitude ?: 0.0,
+                        startLng = currentLocation?.longitude ?: 0.0,
+                        endLat = dest.y?.toDoubleOrNull() ?: 0.0,
+                        endLng = dest.x?.toDoubleOrNull() ?: 0.0
+                    )
+                }) { Text("확인") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDialog = false }) {
+                    Text("취소")
                 }
             }
-        } catch (e: SecurityException) {
-            // 권한 없을 경우 처리
-        }
-    }
-    val cameraPositionState = rememberCameraPositionState {
-        // currentLocation이 null이면 초기 위치 이동하지 않음
-        currentLocation?.let { loc ->
-            position = CameraPosition(loc, 15.0)
-        }
-    }
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        NaverMap(
-            modifier = Modifier.fillMaxSize(),
-            locationSource = rememberFusedLocationSource(),
-            properties = MapProperties(
-                locationTrackingMode = LocationTrackingMode.Follow,
-            ),
-            uiSettings = MapUiSettings(
-                isLocationButtonEnabled = true,
-            ),
-            cameraPositionState = cameraPositionState
         )
     }
 }
@@ -218,7 +213,6 @@ fun BottomNavigationBar(navController: NavController) {
     val items = listOf(
         Screen.Home,
         Screen.Search,
-        Screen.Map,
         Screen.Settings
     )
 
@@ -241,5 +235,44 @@ fun BottomNavigationBar(navController: NavController) {
                 label = { Text(screen.label) }
             )
         }
+    }
+}
+
+@Composable
+fun SearchResultCard(item: GeocodeAddress,
+                     onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+            .clickable { onClick() }
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            item.roadAddress?.let {
+                Text("도로명 주소: $it")
+            }
+            item.jibunAddress?.let {
+                Text("지번 주소: $it")
+            }
+            Text("위도: ${item.y}")
+            Text("경도: ${item.x}")
+        }
+
+    }
+}
+
+@Composable
+fun DirectionResultCard(item: Traoptimal?) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("요약: ${item?.summary}")
+            Text("경로: ${item?.path}")
+        }
+
     }
 }
