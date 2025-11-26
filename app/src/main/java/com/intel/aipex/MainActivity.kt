@@ -112,7 +112,7 @@ fun SplashScreen(onTimeout: () -> Unit) {
 
 @OptIn(ExperimentalNaverMapApi::class)
 @Composable
-fun HomeScreen(locationSource: FusedLocationSource,) {
+fun HomeScreen(locationSource: FusedLocationSource) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         NaverMap(
             locationSource = locationSource,
@@ -138,19 +138,18 @@ fun SearchScreen(
     var query by remember { mutableStateOf("") }
     // 위치 제공자
     var currentLocation by remember { mutableStateOf<LatLng?>(null) }
-    var dialogStage by remember { mutableStateOf(0) }
+    var dialogStage by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         try {
-            // lastLocation을 직접 가져오기
             val loc = locationSource.lastLocation
             loc?.let {
                 currentLocation = LatLng(it.latitude, it.longitude)
             }
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             // 권한 없으면 처리
         }
     }
-    /* 🔥 길찾기 결과가 들어오면 NavigationScreen으로 이동 */
+    /* 길찾기 결과 NavigationScreen 이동 */
     LaunchedEffect(routeResult) {
         if (routeResult != null && currentLocation != null) {
             navController.navigate("navigation")
@@ -163,7 +162,7 @@ fun SearchScreen(
             value = query,
             onValueChange = { query = it },
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("검색어를 입력하세요") },
+            placeholder = { Text("어디로 갈까요?") },
             singleLine = true,
             leadingIcon = {
                 Icon(Icons.Default.Search, contentDescription = "search")
@@ -185,29 +184,22 @@ fun SearchScreen(
             }
             items(openResults) { item ->
                 SearchResultCard(item = item) {
-                    // 주소 선택 → 지오코드 실행
+                    // 주소 선택 → geocode 실행
                     val address = item.address ?: item.roadAddress ?: return@SearchResultCard
                     mapModel.geocode(address)
                     dialogStage = 2
                 }
             }
-            // ─────────────── 길찾기 결과 ───────────────
-            /*item {
-                Spacer(Modifier.height(10.dp))
-                if (geoResults.isNotEmpty() && routeResult != null) {
-                    DirectionResultCard(item = routeResult!!)
-                }
-            }*/
         }
     }
-    // 길찾기 다이얼로그
+    // route search dialog
     if (dialogStage == 2 && geoResults.isNotEmpty()) {
         val dest = geoResults[0]
         AlertDialog(
             onDismissRequest = { dialogStage = 0 },
             title = { Text("길찾기") },
             text = {
-                Text("해당 위치까지 길찾기를 실행할까요?\n")
+                Text("해당 위치로 안내해 드릴까요?\n")
             },
             confirmButton = {
                 TextButton(onClick = {
@@ -249,6 +241,7 @@ fun NavigationScreen(
         return
     }
     LaunchedEffect(Unit) {
+        mapModel.initGrpc()
         while (true) {
             try {
                 val loc = locationSource.lastLocation
@@ -256,7 +249,7 @@ fun NavigationScreen(
                     val lat = loc.latitude
                     val lng = loc.longitude
                     currentLocation = LatLng(lat, lng)
-                    // ViewModel에도 현재 위치 저장
+                    // ViewModel 현재 위치 저장
                     mapModel.updateCurrentLocation(lat, lng)
                     // 다음 안내 갱신
                     mapModel.updateNextGuide(lat, lng)
@@ -265,7 +258,7 @@ fun NavigationScreen(
             delay(1000L) // 1초마다 GPS 체크
         }
     }
-    // 🔥 다음 안내지점까지 남은 거리 계산
+    // 🔥 다음 지점 남은 거리 계산
     val remainingDistance by remember(currentLocation, nextGuidePoint) {
         derivedStateOf {
             if (currentLocation != null && nextGuidePoint != null) {
@@ -281,22 +274,30 @@ fun NavigationScreen(
             } else null
         }
     }
+    LaunchedEffect(nextGuide, remainingDistance) {
+        if(nextGuide!=null && remainingDistance!=null) {
+            mapModel.sendGrpc(
+                instruction = nextGuide?.instructions,
+                distance = remainingDistance
+            )
+        }
+    }
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp)
     ) {
-        Text("🚗 네비게이션 안내", style = MaterialTheme.typography.headlineMedium)
+        Text("🚗 Navigation 안내", style = MaterialTheme.typography.headlineMedium)
 
         Spacer(Modifier.height(20.dp))
 
         // 🔥 다음 안내 문구
         Text(
-            text = nextGuide?.instructions ?: "경로를 따라 이동하세요",
+            text = nextGuide?.instructions ?: "경로를 따라 이동",
             style = MaterialTheme.typography.titleLarge
         )
         Spacer(Modifier.height(20.dp))
         Text(
             text = if (remainingDistance != null)
-                "다음 안내 지점까지 ${remainingDistance}m 남음"
+                "다음 안내 지점 ${remainingDistance}m 남음"
             else
                 "거리 계산 중...",
             style = MaterialTheme.typography.titleMedium
@@ -331,7 +332,7 @@ fun NavigationScreen(
 @Composable
 fun RecordingScreen() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("비디오 녹화 관련 기능 제공할 예정. 파이에서 스트리밍하는 영상 수신해서 녹화 후 저장")
+        Text("비디오 녹화 관련 기능 제공할 예정. 파이 Stream 영상 수신, 녹화 후 저장")
     }
 }
 
@@ -399,47 +400,6 @@ fun SearchResultCard(
                 Text(
                     text = "지번: $it",
                     style = MaterialTheme.typography.bodyMedium
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun DirectionResultCard(
-    item: Traoptimal
-) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        elevation = CardDefaults.cardElevation(4.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(
-                text = "경로 탐색 결과",
-                style = MaterialTheme.typography.titleMedium
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "거리: ${item.summary.distance} m",
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Text(
-                text = "도착 예상 시간: ${(item.summary.duration / 60000)} 분",
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Spacer(Modifier.height(12.dp))
-            Text(
-                text = "경로 안내",
-                style = MaterialTheme.typography.titleSmall
-            )
-            Spacer(Modifier.height(6.dp))
-            item.guide.forEach { g ->
-                Text(
-                    text = "- ${g.instructions} (${g.distance}m)",
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(bottom = 4.dp)
                 )
             }
         }

@@ -1,8 +1,11 @@
 package com.intel.aipex
 
+import GrpcClient
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.naver.maps.geometry.LatLng
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -112,18 +115,38 @@ class MapSearchViewModel(
     }
     //거리 계산
     private fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
-        val R = 6371e3
+        val r = 6371e3
         val dLat = Math.toRadians(lat2 - lat1)
         val dLon = Math.toRadians(lon2 - lon1)
         val a = sin(dLat / 2) * sin(dLat / 2) +
                 cos(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) *
                 sin(dLon / 2) * sin(dLon / 2)
         val c = 2 * atan2(sqrt(a), sqrt(1 - a))
-        return R * c
+        return r * c
     }
-
     fun clearRoute() {
         _routeResult.value = null
         _nextGuide.value = null
+    }
+    //grpc connect
+    private var grpcClient: GrpcClient? = null
+
+    fun initGrpc() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                grpcClient = GrpcClient()
+                grpcClient?.startStream()
+            } catch (e: Exception) {
+                Log.e("NavigationViewModel", "gRPC init failed: $e")
+            }
+        }
+    }
+    fun sendGrpc(instruction: String?, distance: Int?) {
+        grpcClient?.sendNavigationInfo(instruction, distance)
+    }
+
+    override fun onCleared() {
+        grpcClient?.close()
+        super.onCleared()
     }
 }
