@@ -1,5 +1,4 @@
 package com.intel.aipex
-
 import android.location.Location
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -18,7 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -34,7 +36,7 @@ import com.naver.maps.map.compose.NaverMap
 import com.naver.maps.map.compose.PolylineOverlay
 import com.naver.maps.map.util.FusedLocationSource
 import kotlinx.coroutines.delay
-
+import kotlin.math.*
 class MainActivity : ComponentActivity() {
     private lateinit var locationSource: FusedLocationSource
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -43,6 +45,7 @@ class MainActivity : ComponentActivity() {
             this,
             LOCATION_PERMISSION_REQUEST_CODE
         )
+        locationSource.isCompassEnabled=true
         enableEdgeToEdge()
         setContent {
             AipexTheme {
@@ -54,13 +57,11 @@ class MainActivity : ComponentActivity() {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1000
     }
 }
-
 sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     object Home : Screen("home", "홈", Icons.Default.LocationOn)
     object Search : Screen("search", "검색", Icons.Default.Search)
     object Recording : Screen("recording", "녹화", Icons.Default.PlayArrow)
 }
-
 @Composable
 fun MainScreen(locationSource: FusedLocationSource) {
     val navController = rememberNavController()
@@ -82,34 +83,27 @@ fun MainScreen(locationSource: FusedLocationSource) {
                     }
                 }
             }
+            composable("navigation") { NavigationScreen(navController = navController, locationSource = locationSource, mapModel = mapModel) }
             composable(Screen.Home.route) { HomeScreen(locationSource = locationSource) }
             composable(Screen.Search.route) { SearchScreen(navController = navController, locationSource = locationSource, mapModel = mapModel) }
-            composable("navigation") { NavigationScreen(navController = navController, locationSource = locationSource, mapModel = mapModel) }
-            composable(Screen.Recording.route) { RecordingScreen() }
+            composable(Screen.Recording.route) { RecordingScreen(mapModel = mapModel) }
         }
     }
 }
-
 @Composable
 fun SplashScreen(onTimeout: () -> Unit) {
     LaunchedEffect(Unit) {
         delay(1500L)  // 1.5초 로고 표시
         onTimeout()
     }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-        contentAlignment = Alignment.Center
-    ) {
+    Box(modifier = Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
         Image(
             painter = painterResource(id = R.drawable.logo_2),
             contentDescription = "App Logo",
-            modifier = Modifier.size(300.dp)
+            modifier = Modifier.size(400.dp)
         )
     }
 }
-
 @OptIn(ExperimentalNaverMapApi::class)
 @Composable
 fun HomeScreen(locationSource: FusedLocationSource) {
@@ -125,7 +119,6 @@ fun HomeScreen(locationSource: FusedLocationSource) {
         )
     }
 }
-
 @Composable
 fun SearchScreen(
     navController: NavController,
@@ -169,7 +162,6 @@ fun SearchScreen(
             }
         )
         Spacer(Modifier.height(10.dp))
-        // 🔍 검색 버튼
         Button(onClick = { mapModel.searchPlace(query) },modifier = Modifier.fillMaxWidth()) {
             Text("검색")
         }
@@ -223,7 +215,6 @@ fun SearchScreen(
         )
     }
 }
-
 @OptIn(ExperimentalNaverMapApi::class)
 @Composable
 fun NavigationScreen(
@@ -236,6 +227,28 @@ fun NavigationScreen(
     val nextGuide by mapModel.nextGuide.collectAsState()
     val nextGuidePoint by mapModel.nextGuidePoint.collectAsState()
     val route = routeResult?.path?.first()
+    var heading by remember { mutableFloatStateOf(0f) }
+    var gpsHeading by remember { mutableFloatStateOf(0f) }
+    var prevLocation by remember { mutableStateOf<Location?>(null) }
+    var speed by remember { mutableFloatStateOf(0f) }
+    val destinationPoint = remember(routeResult) {
+        routeResult?.path?.lastOrNull()
+    }
+    val targetBearing = remember(currentLocation, nextGuidePoint) {
+        if (currentLocation != null && nextGuidePoint != null) {
+            calculateBearing(
+                currentLocation!!.latitude,
+                currentLocation!!.longitude,
+                nextGuidePoint!![1],
+                nextGuidePoint!![0]
+            )
+        } else null
+    }
+    val directionDelta = remember(heading, targetBearing) {
+        if (targetBearing != null)
+            getDirectionDelta(heading, targetBearing)
+        else 0f
+    }
     if (route == null) {
         Text("경로 데이터 없음")
         return
@@ -248,17 +261,33 @@ fun NavigationScreen(
                 if (loc != null) {
                     val lat = loc.latitude
                     val lng = loc.longitude
+                    // 이동속도 계산
+                    prevLocation?.let { prev ->
+                        val d = prev.distanceTo(loc) // 미터
+                        val t = (loc.time - prev.time) / 1000f // 초
+                        if (t > 0 && d < 50) { // 순간 튐 방지
+                            speed = d / t // m/s
+                        }
+                    }
+                    prevLocation = loc
+                    currentLocation?.let {
+                        gpsHeading = calculateHeading(
+                            prevLat = it.latitude, it.longitude,
+                            currLat = lat, currLng = lng
+                        )
+                    }
                     currentLocation = LatLng(lat, lng)
                     // ViewModel 현재 위치 저장
                     mapModel.updateCurrentLocation(lat, lng)
                     // 다음 안내 갱신
                     mapModel.updateNextGuide(lat, lng)
+                    heading = loc.bearing
                 }
             } catch (_: SecurityException) { }
             delay(1000L) // 1초마다 GPS 체크
         }
     }
-    // 🔥 다음 지점 남은 거리 계산
+    //다음 지점 남은 거리 계산
     val remainingDistance by remember(currentLocation, nextGuidePoint) {
         derivedStateOf {
             if (currentLocation != null && nextGuidePoint != null) {
@@ -274,27 +303,43 @@ fun NavigationScreen(
             } else null
         }
     }
+    // 목적지까지 남은 거리 & ETA 계산
+    val etaMinutes = remember(currentLocation, speed) {
+        if (destinationPoint != null && currentLocation != null && speed > 0.5f) {
+            val dest = Location("").apply {
+                latitude = destinationPoint[1]
+                longitude = destinationPoint[0]
+            }
+            val curr = Location("").apply {
+                latitude = currentLocation!!.latitude
+                longitude = currentLocation!!.longitude
+            }
+            val remain = curr.distanceTo(dest) // meters
+            val sec = remain / speed
+            (sec / 60).toInt()
+        } else null
+    }
     LaunchedEffect(nextGuide, remainingDistance) {
         if(nextGuide!=null && remainingDistance!=null) {
             mapModel.sendGrpc(
                 instruction = nextGuide?.instructions,
-                distance = remainingDistance
+                distance = remainingDistance,
+                heading = gpsHeading.toInt(),
+                speed = speed,
+                eta = etaMinutes
             )
         }
     }
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp)
     ) {
-        Text("🚗 Navigation 안내", style = MaterialTheme.typography.headlineMedium)
-
-        Spacer(Modifier.height(20.dp))
-
-        // 🔥 다음 안내 문구
+        Text("Navigation 안내", style = MaterialTheme.typography.headlineMedium)
+        Spacer(Modifier.height(10.dp))
         Text(
             text = nextGuide?.instructions ?: "경로를 따라 이동",
             style = MaterialTheme.typography.titleLarge
         )
-        Spacer(Modifier.height(20.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
             text = if (remainingDistance != null)
                 "다음 안내 지점 ${remainingDistance}m 남음"
@@ -302,12 +347,25 @@ fun NavigationScreen(
                 "거리 계산 중...",
             style = MaterialTheme.typography.titleMedium
         )
-        Spacer(Modifier.height(20.dp))
-        Box(modifier = Modifier.height(300.dp), contentAlignment = Alignment.Center){
+        Spacer(Modifier.height(10.dp))
+        Text(text = "현재 방향(센서): ${heading.toInt()}°")
+        Text(text = "현재 방향(gps): ${gpsHeading.toInt()}°")
+        DirectionArrow(directionDelta)
+        Spacer(Modifier.height(5.dp))
+        Box(modifier = Modifier.height(300.dp) , contentAlignment = Alignment.Center){
             NaverMap(
                 locationSource = locationSource,
                 properties = MapProperties(
                     locationTrackingMode = LocationTrackingMode.Face,
+                ),
+                uiSettings = MapUiSettings(
+                    isScrollGesturesEnabled = false,
+                    isZoomGesturesEnabled = false,
+                    isTiltGesturesEnabled = false,
+                    isRotateGesturesEnabled = false,
+                    isStopGesturesEnabled = false,
+                    isScaleBarEnabled = false,
+                    isZoomControlEnabled = false
                 )
             ){
                 // Polyline 표시
@@ -320,7 +378,12 @@ fun NavigationScreen(
                 }
             }
         }
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(5.dp))
+        // 속도
+        Text("현재 속도: ${"%.1f".format(speed * 3.6f)} km/h")
+        // ETA
+        Text("ETA: ${etaMinutes ?: "--"} 분")
+        Spacer(Modifier.height(5.dp))
         Button(onClick = {
             mapModel.clearRoute()
             navController.popBackStack()
@@ -330,20 +393,27 @@ fun NavigationScreen(
     }
 }
 @Composable
-fun RecordingScreen() {
+fun RecordingScreen(mapModel: MapSearchViewModel) {
+    val frameBitmap by mapModel.currentFrame.collectAsState()
+    // 그리기
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("비디오 녹화 관련 기능 제공할 예정. 파이 Stream 영상 수신, 녹화 후 저장")
+        if (frameBitmap != null) {
+            Image(
+                bitmap = frameBitmap!!.asImageBitmap(),
+                contentDescription = "Camera Stream",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } else {
+            Text("영상 수신 대기중...", color = Color.Gray)
+        }
     }
 }
-
 @Composable
 fun BottomNavigationBar(navController: NavController) {
     val items = listOf(
-        Screen.Home,
-        Screen.Search,
-        Screen.Recording
+        Screen.Home, Screen.Search, Screen.Recording
     )
-
     NavigationBar {
         val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
         items.forEach { screen ->
@@ -364,7 +434,6 @@ fun BottomNavigationBar(navController: NavController) {
         }
     }
 }
-
 @Composable
 fun SearchResultCard(
     item: OpenSearchItem,
@@ -404,4 +473,52 @@ fun SearchResultCard(
             }
         }
     }
+}
+fun calculateHeading(
+    prevLat: Double, prevLng: Double, currLat: Double, currLng: Double
+): Float {
+    val lat1 = Math.toRadians(prevLat)
+    val lon1 = Math.toRadians(prevLng)
+    val lat2 = Math.toRadians(currLat)
+    val lon2 = Math.toRadians(currLng)
+    val dLon = lon2 - lon1
+    val y = sin(dLon) * cos(lat2)
+    val x = cos(lat1) * sin(lat2) -
+            sin(lat1) * cos(lat2) * cos(dLon)
+    var bearing = Math.toDegrees(atan2(y, x))
+    // 0~360 범위로 변환
+    if (bearing < 0) {
+        bearing += 360.0
+    }
+    return bearing.toFloat()
+}
+fun calculateBearing(
+    currentLat: Double, currentLng: Double, targetLat: Double, targetLng: Double
+): Float {
+    val start = Location("").apply {
+        latitude = currentLat
+        longitude = currentLng
+    }
+    val end = Location("").apply {
+        latitude = targetLat
+        longitude = targetLng
+    }
+    return start.bearingTo(end) // 결과: 0~360 (북=0, 동=90, 남=180, 서=270)
+}
+fun getDirectionDelta(userHeading: Float, targetBearing: Float): Float {
+    var diff = (targetBearing - userHeading + 360) % 360
+    if (diff > 180) diff -= 360   // -180 ~ 180 범위로 조정
+    return diff
+}
+@Composable
+fun DirectionArrow(directionDelta: Float) {
+    Icon(
+        painter = painterResource(id = R.drawable.arrows),
+        contentDescription = "Direction Arrow",
+        modifier = Modifier
+            .size(60.dp)
+            .graphicsLayer {
+                rotationZ = directionDelta  // 화살표 회전
+            }
+    )
 }

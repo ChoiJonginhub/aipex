@@ -5,6 +5,10 @@ option java_multiple_files = true;
 import "data_types.proto";
 
 service ComputeService {
-  // data_types 패키지의 메시지명을 명시적으로 사용
-  rpc Datastream(stream data_types.Command) returns (stream data_types.ServerMessage);
+  // data_types
+  rpc dataStream(stream data_types.Command) returns (stream data_types.ServerMessage);
+}
+
+service VideoRecordService {
+  rpc ReceiveFrames(data_types.ClientMessage) returns (stream data_types.ServerMessage);
 }

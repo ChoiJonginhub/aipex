@@ -1,6 +1,7 @@
 package com.intel.aipex
 
 import GrpcClient
+import android.graphics.Bitmap
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -36,8 +37,15 @@ class MapSearchViewModel(
     val nextGuide: StateFlow<Guidence?> = _nextGuide
     private val _nextGuidePoint = MutableStateFlow<List<Double>?>(null)
     val nextGuidePoint: StateFlow<List<Double>?> = _nextGuidePoint
+    // video recording
+    // 최신 프레임을 보관하는 상태
+    private val _currentFrame = MutableStateFlow<Bitmap?>(null)
+    val currentFrame: StateFlow<Bitmap?> = _currentFrame
 
     private var currentGuideIndex = 0
+    //grpc setting
+    private var host = "10.42.0.1"
+    private var port = 50052
 
     fun updateCurrentLocation(lat: Double, lng: Double) {
         _currentLocation.value = lat to lng
@@ -130,23 +138,29 @@ class MapSearchViewModel(
     }
     //grpc connect
     private var grpcClient: GrpcClient? = null
-
     fun initGrpc() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                grpcClient = GrpcClient()
-                grpcClient?.startStream()
+                grpcClient = GrpcClient(host, port)
             } catch (e: Exception) {
                 Log.e("NavigationViewModel", "gRPC init failed: $e")
             }
         }
     }
-    fun sendGrpc(instruction: String?, distance: Int?) {
-        grpcClient?.sendNavigationInfo(instruction, distance)
+    fun sendGrpc(instruction: String?, distance: Int?, heading: Int?, speed: Float?, eta: Int?) {
+        grpcClient?.sendNavigationInfo(instruction, distance, heading, speed, eta)
     }
-
+    // video receiver
+    private var vGrpcClient: VideoGrpcClient? = null
+    fun startVideoStream() {
+        vGrpcClient = VideoGrpcClient(host, port)
+        vGrpcClient?.startReceiving { bitmap ->
+            _currentFrame.value = bitmap   // 프레임 업데이트
+        }
+    }
     override fun onCleared() {
         grpcClient?.close()
+        vGrpcClient?.close()
         super.onCleared()
     }
 }
