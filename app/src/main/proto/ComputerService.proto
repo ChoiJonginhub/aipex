@@ -8,7 +8,3 @@ service ComputeService {
   // data_types
   rpc dataStream(stream data_types.Command) returns (stream data_types.ServerMessage);
 }
-
-service VideoRecordService {
-  rpc ReceiveFrames(data_types.ClientMessage) returns (stream data_types.ServerMessage);
-}

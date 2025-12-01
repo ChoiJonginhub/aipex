@@ -1,6 +1,7 @@
 package com.intel.aipex
 import android.location.Location
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -21,6 +22,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -36,6 +38,7 @@ import com.naver.maps.map.compose.NaverMap
 import com.naver.maps.map.compose.PolylineOverlay
 import com.naver.maps.map.util.FusedLocationSource
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlin.math.*
 class MainActivity : ComponentActivity() {
     private lateinit var locationSource: FusedLocationSource
@@ -64,8 +67,11 @@ sealed class Screen(val route: String, val label: String, val icon: ImageVector)
 }
 @Composable
 fun MainScreen(locationSource: FusedLocationSource) {
+    val context = LocalContext.current.applicationContext
     val navController = rememberNavController()
-    val mapModel: MapSearchViewModel = viewModel()
+    val mapModel: MapSearchViewModel = viewModel(
+        factory = MapSearchViewModelFactory(context)
+    )
     Scaffold(
         bottomBar = {
             BottomNavigationBar(navController)
@@ -84,7 +90,7 @@ fun MainScreen(locationSource: FusedLocationSource) {
                 }
             }
             composable("navigation") { NavigationScreen(navController = navController, locationSource = locationSource, mapModel = mapModel) }
-            composable(Screen.Home.route) { HomeScreen(locationSource = locationSource) }
+            composable(Screen.Home.route) { HomeScreen(locationSource = locationSource, mapModel = mapModel) }
             composable(Screen.Search.route) { SearchScreen(navController = navController, locationSource = locationSource, mapModel = mapModel) }
             composable(Screen.Recording.route) { RecordingScreen(mapModel = mapModel) }
         }
@@ -106,7 +112,12 @@ fun SplashScreen(onTimeout: () -> Unit) {
 }
 @OptIn(ExperimentalNaverMapApi::class)
 @Composable
-fun HomeScreen(locationSource: FusedLocationSource) {
+fun HomeScreen(locationSource: FusedLocationSource, mapModel: MapSearchViewModel) {
+    // 2. 버튼 텍스트 상태 관리 (ON/OFF 상태를 시각적으로 보여주기 위함)
+    var isWakeUpActive by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        mapModel.initWakeGrpc()
+    }
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         NaverMap(
             locationSource = locationSource,
@@ -117,6 +128,30 @@ fun HomeScreen(locationSource: FusedLocationSource) {
                 isLocationButtonEnabled = true,
             )
         )
+        // 4. 버튼 추가 (지도 위에 오버레이)
+        Button(
+            onClick = {
+                // 버튼 클릭 시 상태 토글
+                isWakeUpActive = !isWakeUpActive
+                // gRPC 호출: 상태에 따라 다른 스크립트를 호출한다고 가정
+                if (isWakeUpActive) {
+                    // "ON" 상태일 때: 스크립트 실행 요청
+                    mapModel.sendWakeSign()
+                    Log.d("GrpcButton", "WakeUp ON (gRPC Triggered)")
+                } else {
+                    // "OFF" 상태일 때: 스크립트 중지 요청 (만약 서버에 중지 기능이 있다면)
+                    mapModel.sendWakeSign()
+                    Log.d("GrpcButton", "WakeUp OFF (gRPC Triggered)")
+                }
+            },
+            // 버튼을 화면 오른쪽 하단에 배치
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp)
+        ) {
+            // 상태에 따라 버튼 텍스트 변경
+            Text(if (isWakeUpActive) "HMD OFF" else "HMD ON")
+        }
     }
 }
 @Composable
@@ -326,7 +361,8 @@ fun NavigationScreen(
                 distance = remainingDistance,
                 heading = gpsHeading.toInt(),
                 speed = speed,
-                eta = etaMinutes
+                eta = etaMinutes,
+                type = nextGuide?.type
             )
         }
     }
@@ -394,18 +430,76 @@ fun NavigationScreen(
 }
 @Composable
 fun RecordingScreen(mapModel: MapSearchViewModel) {
+    val context = LocalContext.current.applicationContext
     val frameBitmap by mapModel.currentFrame.collectAsState()
-    // 그리기
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        if (frameBitmap != null) {
-            Image(
-                bitmap = frameBitmap!!.asImageBitmap(),
-                contentDescription = "Camera Stream",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            Text("영상 수신 대기중...", color = Color.Gray)
+    var isRecording by remember { mutableStateOf(false) }
+    val outputPath = mapModel.createVideoFile()
+
+    val snackbarHostState = remember { SnackbarHostState() } // Material3용
+    val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        mapModel.startVideoStream()
+    }
+    Scaffold(
+        snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
+    ) { padding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            contentAlignment = Alignment.Center
+        ) {
+            // 영상 출력
+            if (frameBitmap != null) {
+                Image(
+                    bitmap = frameBitmap!!.asImageBitmap(),
+                    contentDescription = "Camera Stream",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit
+                )
+            } else {
+                Text("영상 수신 대기중...", color = Color.Gray)
+            }
+
+            // 녹화 버튼
+            FloatingActionButton(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(20.dp),
+                onClick = {
+                    if (!isRecording) {
+                        val path = outputPath
+                        val w = frameBitmap?.width ?: 640
+                        val h = frameBitmap?.height ?: 480
+                        mapModel.startRecording(path, w, h)
+
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("녹화를 시작합니다.")
+                        }
+                    } else {
+                        mapModel.stopRecording()
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("녹화를 종료했습니다.")
+                        }
+                    }
+                    isRecording = !isRecording
+                }
+            ) {
+                if (isRecording) {
+                    Image(
+                        painter = painterResource(id = R.drawable.stop),
+                        contentDescription = "Stop",
+                        modifier = Modifier.size(24.dp)
+                    )
+                } else {
+                    Image(
+                        painter = painterResource(id = R.drawable.record),
+                        contentDescription = "Record",
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+            }
         }
     }
 }

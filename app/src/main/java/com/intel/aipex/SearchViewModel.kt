@@ -1,7 +1,9 @@
 package com.intel.aipex
 
 import GrpcClient
+import android.content.Context
 import android.graphics.Bitmap
+import android.os.Environment
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -10,15 +12,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.io.File
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 class MapSearchViewModel(
-    private val openRepo: OpenSearchRepository = OpenSearchRepository(),
-    private val geocodeRepo: SearchRepository = SearchRepository(),
-    private val directionRepo: DirectionRepository = DirectionRepository()
+    context: Context,
+    private val openRepo: OpenSearchRepository = OpenSearchRepository(context),
+    private val geocodeRepo: SearchRepository = SearchRepository(context),
+    private val directionRepo: DirectionRepository = DirectionRepository(context)
 ) : ViewModel() {
     // 1. 검색 결과(OpenAPI)
     private val _openSearchResult = MutableStateFlow<List<OpenSearchItem>>(emptyList())
@@ -44,8 +48,14 @@ class MapSearchViewModel(
 
     private var currentGuideIndex = 0
     //grpc setting
-    private var host = "10.42.0.1"
+    //private var host = "192.168.137.184"//sung
+    private var host = "10.42.0.1"//aipexHs
     private var port = 50052
+    //private var videoHost = "192.168.137.195"
+    private var videoHost = "10.42.0.128"
+    private var videoPort = 50055
+    private var wakeupHost = "10.42.0.128"
+    private var wakeupPort = 50050
 
     fun updateCurrentLocation(lat: Double, lng: Double) {
         _currentLocation.value = lat to lng
@@ -138,6 +148,7 @@ class MapSearchViewModel(
     }
     //grpc connect
     private var grpcClient: GrpcClient? = null
+    private var wakeClient: WakeGrpcClient? = null
     fun initGrpc() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -147,20 +158,87 @@ class MapSearchViewModel(
             }
         }
     }
-    fun sendGrpc(instruction: String?, distance: Int?, heading: Int?, speed: Float?, eta: Int?) {
-        grpcClient?.sendNavigationInfo(instruction, distance, heading, speed, eta)
+    fun initWakeGrpc() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                wakeClient = WakeGrpcClient(wakeupHost, wakeupPort)
+            } catch (e: Exception) {
+                Log.e("NavigationViewModel", "gRPC wake init failed: $e")
+            }
+        }
+    }
+    fun sendWakeSign(){
+        wakeClient?.sendSign()
+    }
+    fun sendGrpc(instruction: String?, distance: Int?, heading: Int?, speed: Float?, eta: Int?, type: Int?) {
+        grpcClient?.sendNavigationInfo(instruction, distance, heading, speed, eta, type)
     }
     // video receiver
     private var vGrpcClient: VideoGrpcClient? = null
+    private var recorder: VideoRecorder? = null
+    private var isRecording = false
     fun startVideoStream() {
-        vGrpcClient = VideoGrpcClient(host, port)
+        vGrpcClient?.close()
+        vGrpcClient = VideoGrpcClient(videoHost, videoPort)
         vGrpcClient?.startReceiving { bitmap ->
             _currentFrame.value = bitmap   // 프레임 업데이트
+            // 녹화 중이면 안전하게 프레임 전송
+            if (isRecording) {
+                try {
+                    recorder?.encodeFrame(bitmap)
+                } catch (e: IllegalStateException) {
+                    Log.e("VideoRecording", "Encoder state error: ${e.message}")
+                }
+            }
+        }
+    }
+    fun createVideoFile(): String {
+        // MediaStore의 표준 Movies 디렉토리 경로를 가져옵니다. (공개적으로 접근 가능한 경로)
+        // API 레벨과 관계없이 Android의 표준 공용 디렉토리입니다.
+        val movieDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+        // 폴더가 없으면 생성합니다.
+        if (!movieDir.exists()) {
+            // 생성에 실패하면 예외를 던집니다.
+            if (!movieDir.mkdirs()) {
+                throw IllegalStateException("Cannot create public Movies directory: ${movieDir.absolutePath}")
+            }
+        }
+        val fileName = "record_${System.currentTimeMillis()}.mp4"
+        return File(movieDir, fileName).absolutePath
+    }
+    /** 녹화 시작 */
+    fun startRecording(path: String, width: Int, height: Int) {
+        // 기존 recorder 종료
+        recorder?.stop()
+        // [중요] VideoRecorder 초기화
+        recorder = VideoRecorder(path, width, height)
+        isRecording = true
+        Log.d("MapSearchViewModel", "Recording started. Output Path: $path")
+    }
+    /** 녹화 종료 */
+    fun stopRecording() {
+        isRecording = false
+        try {
+            recorder?.stop()
+        } catch (e: IllegalStateException) {
+            Log.e("VideoRecording", "Stop failed: ${e.message}")
+        } finally {
+            recorder = null
         }
     }
     override fun onCleared() {
-        grpcClient?.close()
-        vGrpcClient?.close()
+        try {
+            vGrpcClient?.close()
+        } catch (_: Exception) {}
+        try {
+            grpcClient?.close()
+        } catch (_: Exception) {}
+        try {
+            wakeClient?.close()
+        } catch (_: Exception) {}
+        try {
+            recorder?.stop()
+        } catch (_: Exception) {}
         super.onCleared()
     }
 }

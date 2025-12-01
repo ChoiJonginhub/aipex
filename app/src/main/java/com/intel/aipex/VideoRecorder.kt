@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
+import android.util.Log
 
 class VideoRecorder(
     private val outputPath: String,
@@ -53,17 +54,36 @@ class VideoRecorder(
         var outputIndex = encoder.dequeueOutputBuffer(bufferInfo, 0)
 
         while (outputIndex >= 0) {
-            if (!isStarted) {
-                trackIndex = muxer.addTrack(encoder.outputFormat)
-                muxer.start()
-                isStarted = true
-            }
             val encodeBuffer = encoder.getOutputBuffer(outputIndex)
+            // 1. 초기 CODEC_CONFIG 처리
+            if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+                // 이 버퍼는 트랙 정보이므로 Muxer에 쓰지 않고, Muxer를 시작합니다.
+                if (!isStarted) {
+                    trackIndex = muxer.addTrack(encoder.outputFormat)
+                    muxer.start()
+                    isStarted = true
+                    Log.d("VideoRecorder", "Muxer started and track added.")
+                }
+                encoder.releaseOutputBuffer(outputIndex, false)
+                outputIndex = encoder.dequeueOutputBuffer(bufferInfo, 0)
+                continue // 다음 버퍼 처리
+            }
+            // 2. Muxer가 시작되지 않았다면 데이터 버퍼는 무시
+            // (이 코드는 CODEC_CONFIG 처리 후 실행되어야 합니다.)
+            if (!isStarted) {
+                // Muxer가 아직 시작되지 않았다면, config 프레임이 오지 않았거나 오류가 발생한 것.
+                // 이 프레임은 유효한 데이터가 아니므로 릴리즈만 하고 다음 프레임을 기다립니다.
+                encoder.releaseOutputBuffer(outputIndex, false)
+                outputIndex = encoder.dequeueOutputBuffer(bufferInfo, 0)
+                continue
+            }
+            // 3. 실제 데이터 버퍼 쓰기
             if (bufferInfo.size > 0 && encodeBuffer != null) {
                 encodeBuffer.position(bufferInfo.offset)
                 encodeBuffer.limit(bufferInfo.offset + bufferInfo.size)
                 muxer.writeSampleData(trackIndex, encodeBuffer, bufferInfo)
             }
+            // 4. 버퍼 릴리즈 및 다음 버퍼 대기
             encoder.releaseOutputBuffer(outputIndex, false)
             outputIndex = encoder.dequeueOutputBuffer(bufferInfo, 0)
         }
@@ -100,20 +120,32 @@ class VideoRecorder(
                 v = v.coerceIn(0, 255)
                 // --- Y 저장 ---
                 yuv[yIndex++] = y.toByte()
-                // --- U, V (4픽셀마다 저장: NV21 형식) ---
+                // --- U, V (4픽셀마다 저장: NV12 형식) ---
                 if (j % 2 == 0 && i % 2 == 0) {
-                    yuv[uvIndex++] = v.toByte() // V 먼저
-                    yuv[uvIndex++] = u.toByte() // 그 다음 U
+                    yuv[uvIndex++] = u.toByte() // U 먼저
+                    yuv[uvIndex++] = v.toByte() // 그 다음 V
                 }
             }
         }
-
         return yuv
     }
     fun stop() {
-        encoder.stop()
-        encoder.release()
-        muxer.stop()
-        muxer.release()
+        try{
+            if(isStarted){
+                encoder.stop()
+                encoder.release()
+                muxer.stop()
+                muxer.release()
+            } else {
+                encoder.stop()
+                encoder.release()
+                muxer.release()
+            }
+        } catch (e: IllegalStateException) {
+            Log.e("Recorder", "Stop failed: ${e.message}")
+            try {
+                muxer.release()
+            }catch (_:Exception) { }
+        }
     }
 }

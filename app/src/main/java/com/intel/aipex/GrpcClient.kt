@@ -19,16 +19,17 @@ class GrpcClient(
     /**
      * Navigation 정보를 JSON 형태로 gRPC 서버로 전달 (Unary RPC)
      */
-    fun sendNavigationInfo(instruction: String?, distance: Int?, heading: Int?, speed: Float?, eta: Int?) {
+    fun sendNavigationInfo(instruction: String?, distance: Int?, heading: Int?, speed: Float?, eta: Int?, type: Int?) {
         scope.launch {
             try {
                 val json = """
                     {
                       "instruction": "${instruction ?: ""}",
                       "remaining_distance": ${distance ?: -1},
-                      "heading": ${heading ?: -1}
-                      "speed": ${speed ?: 0.0}
-                      "eta": ${eta ?: -1}
+                      "heading": ${heading ?: -1},
+                      "speed": ${speed ?: 0.0},
+                      "eta": ${eta ?: -1},
+                      "type": ${type ?: 0}
                     }
                 """.trimIndent()
                 val request = AppComm.JSONRequest.newBuilder()

@@ -28,7 +28,8 @@ interface DirectionApi {
         @Header("x-ncp-apigw-api-key-id") clientId: String,
         @Header("x-ncp-apigw-api-key") clientSecret: String,
         @Query("start") start: String,
-        @Query("goal") goal: String
-        //@Query("option") option: String
+        @Query("goal") goal: String,
+        //@Query("option") option: String,
+        @Query("lang") lang: String
     ): DirectionResponse
 }
